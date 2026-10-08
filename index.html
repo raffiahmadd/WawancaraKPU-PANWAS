@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SELEKSI WAWANCARA KPU PANWAS PEMIRA UM 2026</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
+    <!-- SheetJS (Excel) & HTML2PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Modal Konfirmasi Universal -->
+    <div id="modal-overlay" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="modal-title">Konfirmasi</h3>
+            <div id="modal-desc" style="margin: 15px 0; color: #475569; font-size: 14px; line-height: 1.5;"></div>
+            <div id="modal-input-container" style="display: none; margin-bottom: 15px;">
+                <label id="modal-input-label" style="font-size: 13px; font-weight: 600;">Input Konfirmasi:</label>
+                <input type="text" id="modal-input" class="form-control" autocomplete="off">
+            </div>
+            <div class="modal-actions" style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button class="btn btn-outline" onclick="closeModal()">Batal</button>
+                <button class="btn btn-danger" id="modal-confirm-btn">Lanjutkan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Preview Import Excel Universal -->
+    <div id="modal-preview" class="modal-overlay">
+        <div class="modal-box" style="max-width: 950px; max-height: 90vh; overflow-y: auto;">
+            <h3 id="preview-title">Preview Import Data</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 15px;">Periksa kembali data. Data yang <span style="color:var(--danger); font-weight:bold;">ERROR</span> akan otomatis dilewati (skip) tanpa membatalkan data yang valid.</p>
+
+            <div id="preview-summary" style="margin-bottom: 15px; font-weight: 500; font-size: 13px; background: #f8fafc; padding: 15px; border-radius: 6px; border: 1px solid var(--border); display:flex; flex-wrap:wrap; gap:15px;"></div>
+
+            <div class="table-responsive" style="max-height: 400px; overflow-y: auto; margin-bottom: 15px; border: 1px solid var(--border);">
+                <table class="table" id="table-preview" style="font-size: 12px; white-space: nowrap;">
+                    <thead><tr id="preview-thead"></tr></thead>
+                    <tbody id="preview-tbody"></tbody>
+                </table>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                <button class="btn btn-outline" onclick="document.getElementById('modal-preview').style.display='none'">Batalkan Import</button>
+                <button class="btn btn-primary" id="btn-execute-import">Import Data Valid ke Firebase</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal DKS / DEV Detail -->
+    <div id="modal-dks-detail" class="modal-overlay">
+        <div class="modal-box" style="max-width: 800px; max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; margin-bottom: 15px;">
+                <h3>Detail Peserta (Real-time)</h3>
+                <button class="btn btn-outline btn-sm" onclick="document.getElementById('modal-dks-detail').style.display='none'">Tutup</button>
+            </div>
+            <div id="dks-detail-content"></div>
+        </div>
+    </div>
+
+    <!-- HALAMAN LOGIN -->
+    <div id="view-login" class="login-wrapper">
+        <div class="login-card">
+            <div style="text-align: center; margin-bottom: 25px;">
+                <div class="logo-placeholder">
+                    <img src="Image/LOGO_DPM_UM.png" alt="DPM UM" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" style="width:100%; height:100%; object-fit:contain;">
+                    <div style="display:none; width: 100%; height: 100%; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; color: var(--text-muted);">LOGO DPM UM</div>
+                </div>
+                <h2 style="font-size: 20px; margin-top: 15px;">SELEKSI WAWANCARA</h2>
+                <p style="font-size: 14px; color: #64748b;">KPU & PANWAS PEMIRA UM 2026</p>
+                <div id="sys-status-badge" style="margin-top: 10px;"></div>
+            </div>
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" id="login-username" class="form-control" placeholder="Masukkan username">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="login-password" class="form-control" placeholder="Masukkan password">
+            </div>
+            <button class="btn btn-primary btn-block" style="margin-top: 10px;" onclick="prosesLogin()">Masuk Sistem</button>
+        </div>
+    </div>
+
+    <!-- DASHBOARD -->
+    <div id="view-app" class="app-layout" style="display: none;">
+
+        <aside class="sidebar no-print">
+            <div class="sidebar-header">
+                <h4>PEMIRA 2026</h4>
+                <div id="user-badge" class="badge" style="margin-top: 5px;">Role</div>
+            </div>
+
+            <ul class="nav-menu" id="nav-pewawancara" style="display: none;">
+                <li class="nav-title">MENU PEWAWANCARA</li>
+                <li class="nav-item active" onclick="switchSection('sec-p-peserta')">Daftar Peserta</li>
+            </ul>
+
+            <ul class="nav-menu" id="nav-dks" style="display: none;">
+                <li class="nav-title">CONTROL ROOM DKS</li>
+                <li class="nav-item active" onclick="switchSection('sec-dks-live')">Monitoring Live</li>
+                <li class="nav-item" onclick="switchSection('sec-dks-rekap')">Rekap & Export</li>
+            </ul>
+
+            <ul class="nav-menu" id="nav-dev" style="display: none;">
+                <li class="nav-title">MENU DEV</li>
+                <li class="nav-item active" onclick="switchSection('sec-dks-live')">Monitoring Live</li>
+                <li class="nav-item" onclick="switchSection('sec-dev-peserta')">Manajemen Peserta</li>
+                <li class="nav-item" onclick="switchSection('sec-dev-instrumen')">Manajemen Instrumen</li>
+                <li class="nav-item" onclick="switchSection('sec-dks-rekap')">Rekap Hasil</li>
+                <li class="nav-item" onclick="switchSection('sec-dev-settings')">Pengaturan & Backup</li>
+                <li class="nav-item" onclick="switchSection('sec-dev-audit')">Audit Log</li>
+            </ul>
+
+            <div class="sidebar-footer">
+                <div style="font-size: 12px; margin-bottom: 10px; color: #64748b;" id="user-display-name">Nama</div>
+                <button class="btn btn-outline btn-block" onclick="prosesLogout()">Keluar</button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+
+            <div class="global-stats-bar" id="global-stats-bar"></div>
+
+            <!-- SECTION: DAFTAR PESERTA (PEWAWANCARA) -->
+            <section id="sec-p-peserta" class="content-section active">
+                <div class="header-section" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <div>
+                        <h2>Daftar Peserta Wawancara</h2>
+                        <p>Pilih kelompok, lalu pilih peserta. Anda hanya dapat meng-claim Pos sesuai kewenangan Anda.</p>
+                    </div>
+                    <div id="btn-tambah-peserta-pew" style="display:none;">
+                        <button class="btn btn-primary" onclick="modalFormPeserta(null)">+ Tambah Peserta Manual</button>
+                    </div>
+                </div>
+                <div class="tabs-container" id="tabs-kelompok"></div>
+                <div class="grid-cards" id="grid-peserta-pewawancara" style="margin-top: 20px;"></div>
+            </section>
+
+            <!-- SECTION: WORKROOM / SESI WAWANCARA -->
+            <section id="sec-p-workroom" class="content-section">
+                <div class="header-section" style="display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
+                    <div>
+                        <button class="btn btn-outline btn-sm" onclick="keluarWorkroom()" style="margin-bottom: 10px;">&larr; Kembali</button>
+                        <h2>Sesi Wawancara <span id="mode-edit-badge" class="badge" style="background:#0ea5e9; color:#fff; display:none;">MODE EDIT/REVIEW</span></h2>
+                        <p id="workroom-subtitle" style="font-size: 14px; font-weight: 500;"></p>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 5px;">SISA WAKTU:</div>
+                        <div class="timer-box" id="workroom-timer">05:00</div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 20px;">
+                    <div id="form-instrumen-container"></div>
+                    <hr class="divider">
+                    <div class="form-group">
+                        <label style="font-size: 15px; font-weight: 600; color: var(--primary);">Catatan Pendalaman / Probing (Opsional)</label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px;">Catat pertanyaan lanjutan atau pedalaman materi di sini. Tidak mempengaruhi nilai.</p>
+                        <textarea id="workroom-probing" class="form-control" rows="3" placeholder="Tulis catatan probing..."></textarea>
+                    </div>
+                    <div class="form-group" style="margin-top: 20px;">
+                        <label style="font-size: 15px; font-weight: 600; color: var(--primary);">Catatan Umum Pewawancara (Wajib)</label>
+                        <textarea id="workroom-catatan" class="form-control" rows="4" placeholder="Tuliskan kesimpulan atau catatan umum mengenai aspek ini..."></textarea>
+                    </div>
+                    <div style="display: flex; gap: 15px; margin-top: 30px;">
+                        <button class="btn btn-success" style="flex: 1; font-size: 16px; padding: 12px;" onclick="konfirmasiSelesaiAspek()">✓ SIMPAN & SELESAIKAN ASPEK</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: CONTROL ROOM (DKS & DEV) -->
+            <section id="sec-dks-live" class="content-section">
+                <div class="header-section"><h2>Control Room (Live Monitoring)</h2></div>
+                <div class="dashboard-stats" id="dks-stats">
+                    <div class="stat-card"><div class="stat-value" id="stat-progress" style="color: #f59e0b;">0</div><div class="stat-label">Sedang Wawancara</div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-partial" style="color: #0ea5e9;">0</div><div class="stat-label">Sebagian Selesai</div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-selesai" style="color: #10b981;">0</div><div class="stat-label">Selesai Keseluruhan</div></div>
+                </div>
+                <div class="card" style="margin-top: 20px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+                        <input type="text" id="live-search" class="form-control" placeholder="Cari Nama/NIM..." onkeyup="renderDKSLive()" style="width:250px;">
+                        <select id="live-filter-stat" class="form-control" style="width:180px;" onchange="renderDKSLive()">
+                            <option value="ALL">Semua Status</option>
+                            <option value="IN_PROGRESS">Sedang Wawancara</option>
+                            <option value="NOT_STARTED">Belum Mulai</option>
+                            <option value="COMPLETED">Selesai</option>
+                        </select>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table" id="table-live-monitoring">
+                            <thead>
+                                <tr>
+                                    <th>No</th><th>Peserta</th><th>Form/Kel</th><th>Status Aspek (Real-time)</th><th>Global Status</th><th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: MANAJEMEN PESERTA (DEV) -->
+            <section id="sec-dev-peserta" class="content-section">
+                <div class="header-section" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap:10px;">
+                    <div><h2>Manajemen Peserta</h2><p>CRUD Master Data Peserta Wawancara (Manual & Excel).</p></div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-outline" onclick="downloadTemplate('PESERTA')">📥 Template Excel</button>
+                        <button class="btn btn-primary" onclick="modalFormPeserta(null)">+ Tambah Manual</button>
+                        <label class="btn btn-success" style="margin:0; cursor:pointer;">
+                            📁 Import Excel <input type="file" id="file-import-peserta" accept=".xlsx, .xls" style="display:none;" onchange="processExcel(event, 'PESERTA')">
+                        </label>
+                        <button class="btn btn-danger" onclick="triggerHapusSemuaPeserta()">⚠️ Hapus Semua</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div style="display:flex; gap:10px; margin-bottom:15px;">
+                        <input type="text" id="dev-peserta-search" class="form-control" placeholder="Cari nama atau NIM..." onkeyup="renderDevPesertaTable()" style="max-width:300px;">
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table" id="table-dev-peserta">
+                            <thead><tr><th>No Peserta</th><th>Nama</th><th>NIM</th><th>Formasi</th><th>Kelompok</th><th>Aksi</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: REKAPITULASI (DKS & DEV) -->
+            <section id="sec-dks-rekap" class="content-section">
+                <div class="header-section" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap:10px;">
+                    <h2>Rekapitulasi Nilai Akhir</h2>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-info" onclick="exportExcelRekap()">📋 Copy Excel</button>
+                        <button class="btn btn-primary" onclick="exportWordRekap()">📄 Export Word</button>
+                        <button class="btn btn-danger" onclick="exportPDFRekap()">🖨️ Export PDF</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                        <input type="text" id="rekap-search" class="form-control" placeholder="Cari Nama/NIM..." onkeyup="renderTableRekap()" style="width: 200px;">
+                        <select id="rekap-filter-formasi" class="form-control" style="width: 150px;" onchange="renderTableRekap()">
+                            <option value="ALL">Semua Formasi</option><option value="KPU">KPU</option><option value="PANWAS">PANWAS</option>
+                        </select>
+                        <select id="rekap-sort" class="form-control" style="width: 180px;" onchange="renderTableRekap()">
+                            <option value="urut_asc">No Urut (Awal-Akhir)</option><option value="nilai_desc">Nilai Tertinggi</option><option value="nilai_asc">Nilai Terendah</option><option value="nama_asc">Nama (A-Z)</option>
+                        </select>
+                    </div>
+                    <div class="table-responsive" id="export-area">
+                        <div id="export-header" style="display: none; text-align: center; margin-bottom: 20px;">
+                            <h2>SELEKSI WAWANCARA KPU & PANWAS PEMIRA UM 2026</h2>
+                            <h4>DPM UNIVERSITAS NEGERI MALANG</h4><hr>
+                        </div>
+                        <table class="table table-bordered" id="table-rekap">
+                            <thead>
+                                <tr>
+                                    <th>No</th><th>Nama</th><th>NIM</th><th>Formasi</th><th>Kel</th>
+                                    <th>Adm</th><th>Med.Inf</th><th>Asp</th><th>T.Sidang</th><th>Wawasan</th><th>Kepem</th>
+                                    <th>Pos1</th><th>Pos2</th><th>Pos3</th><th>TOTAL</th><th>Max Score</th><th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: MANAJEMEN INSTRUMEN (DEV) -->
+            <section id="sec-dev-instrumen" class="content-section">
+                <div class="header-section" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <div><h2>Manajemen Instrumen</h2><p>Kelola Master Aspek & Bank Pertanyaan (Manual & Excel Terintegrasi).</p></div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items:center;">
+                        <button class="btn btn-outline" onclick="downloadTemplate('INSTRUMEN')">📥 Template Excel</button>
+
+                        <div style="display:flex; gap:5px; border-left: 2px solid var(--border); padding-left: 10px;">
+                            <button class="btn btn-primary" onclick="modalTambahAspekManual()">+ Aspek Manual</button>
+                            <button class="btn btn-primary" onclick="modalTambahPertanyaanManual()">+ Soal Manual</button>
+                        </div>
+
+                        <div style="display:flex; gap:5px; border-left: 2px solid var(--border); padding-left: 10px;">
+                            <label class="btn btn-success" style="margin:0; cursor:pointer;">
+                                📁 Import Excel (Aspek & Soal)
+                                <input type="file" id="file-import-instrumen" accept=".xlsx, .xls" style="display:none;" onchange="processExcel(event, 'INSTRUMEN')">
+                            </label>
+                        </div>
+
+                        <button class="btn btn-danger" onclick="triggerHapusSemuaInstrumen()" style="margin-left: 10px;">⚠️ Hapus Semua</button>
+                    </div>
+                </div>
+                <div class="card" style="margin-top:20px;">
+                    <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                        <select id="dev-inst-formasi" class="form-control" style="width: 200px;" onchange="renderDevInstrumenTable()">
+                            <option value="KPU">Instrumen KPU</option>
+                            <option value="PANWAS">Instrumen PANWAS</option>
+                        </select>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table" id="table-dev-inst">
+                            <thead><tr><th>Pos</th><th>Aspek</th><th>Indikator</th><th>Pertanyaan</th><th>Nilai Max</th><th>Status</th><th>Aksi</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: AUDIT LOG (DEV) -->
+            <section id="sec-dev-audit" class="content-section">
+                <div class="header-section"><h2>Audit Log Sistem</h2><p>Catatan seluruh aktivitas kritikal (Real-time).</p></div>
+                <div class="card">
+                    <div style="display:flex; gap:10px; margin-bottom:15px;">
+                        <input type="text" id="audit-search" class="form-control" placeholder="Cari log..." onkeyup="filterAuditLog()">
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table" id="table-audit">
+                            <thead><tr><th>Waktu</th><th>User</th><th>Role</th><th>Aksi</th><th>Modul</th><th>Target/Detail</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: PENGATURAN & BACKUP (DEV) -->
+            <section id="sec-dev-settings" class="content-section">
+                <div class="header-section"><h2>Pengaturan Sistem & Data</h2></div>
+                <div class="grid-cards">
+                    <div class="card">
+                        <h3>Konfigurasi</h3><hr class="divider">
+                        <div class="form-group"><label>Nama Website</label><input type="text" id="set-webname" class="form-control"></div>
+                        <div class="form-group">
+                            <label>Durasi Timer (Detik)</label>
+                            <div style="display:flex; gap:10px;">
+                                <input type="number" id="set-t1" class="form-control" placeholder="Pos 1">
+                                <input type="number" id="set-t2" class="form-control" placeholder="Pos 2">
+                                <input type="number" id="set-t3" class="form-control" placeholder="Pos 3">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="simpanSettings()">Simpan Pengaturan</button>
+                    </div>
+                    <div class="card" style="border: 1px solid var(--danger);">
+                        <h3 style="color: var(--danger);">Reset & Backup</h3><hr class="divider">
+                        <button class="btn btn-info btn-block" style="margin-bottom: 10px;" onclick="backupProgress()">💾 Simpan Backup</button>
+                        <button class="btn btn-danger btn-block" onclick="triggerResetAll()">⚠️ RESET HASIL WAWANCARA</button>
+                        <p style="font-size:11px; color:var(--text-muted); margin-top:5px; text-align:center;">Reset menghapus sesi/skor, TIDAK menghapus peserta/instrumen.</p>
+                        <h4 style="margin-top: 20px; font-size:13px;">Riwayat Backup</h4>
+                        <div id="list-backups" style="max-height: 150px; overflow-y: auto; font-size: 12px; border:1px solid #e2e8f0; padding:10px; border-radius:6px; margin-top:10px;"></div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
