@@ -23,6 +23,14 @@ let dbParticipants = {};
 let dbSessions = {};
 let dbInstruments = {};
 let auditLogsArray = [];
+// URL Web App Apps Script (opsional) agar Google Sheet langsung disinkronkan setelah tiap simpan.
+// Isi setelah Deploy > Aplikasi web. Kosongkan jika tidak dipakai (Sheet tetap sinkron maks. 1 menit).
+const SHEET_SYNC_URL = '';
+let serverOffset = 0;               // selisih jam perangkat vs jam server Firebase
+const serverNow = () => Date.now() + serverOffset;
+let kickTimer = null;
+let syncInfo = null;
+let noteSaveTimer = null;
 
 let activeTabKelompok = "1";
 let parsedExcelData = [];
@@ -86,9 +94,16 @@ window.onload = () => {
         auditLogsArray = arr.reverse();
         if (currentUser?.role === 'DEV') filterAuditLog();
     });
+
+    db.ref('.info/serverTimeOffset').on('value', snap => { serverOffset = snap.val() || 0; });
+
+    // Status sinkronisasi spreadsheet (ditulis oleh Google Apps Script)
+    db.ref('syncStatus').on('value', snap => { syncInfo = snap.val(); renderSyncStatus(); });
+
 };
 
 // ---------- Helper instrumen dinamis ----------
+function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sanitizeKey(s) { return String(s).replace(/[.$#\[\]\/]/g, '-').trim(); }
 
 function hashKey(str) {
@@ -105,11 +120,12 @@ function syncDynamicAspects() {
 
 // Daftar aspek (yang punya minimal 1 soal aktif) untuk satu formasi, urut sesuai "Urutan Aspek"
 function getAspectList(formasi) {
-    const res = [], f = dbInstruments[formasi] || {};
-    Object.keys(f).forEach(pos => Object.keys(f[pos] || {}).forEach(asp => {
+    const res = [], seen = new Set(), f = dbInstruments[formasi] || {};
+    Object.keys(f).sort().forEach(pos => Object.keys(f[pos] || {}).forEach(asp => {
+        if (seen.has(asp)) return; // satu nama aspek = satu sesi per peserta
         const node = f[pos][asp] || {};
         const hasActive = Object.keys(node).some(k => k !== '_meta' && node[k] && node[k].active !== false);
-        if (hasActive) res.push({ name: asp, pos, urutan: node._meta?.urutan ?? 99 });
+        if (hasActive) { seen.add(asp); res.push({ name: asp, pos, urutan: node._meta?.urutan ?? 99 }); }
     }));
     return res.sort((a, b) => a.urutan - b.urutan);
 }
@@ -128,6 +144,7 @@ function refreshAllViews() {
         renderTableRekap();
     }
     if (currentUser.role === 'DEV') renderDevPesertaTable();
+    renderSyncStatus();
 }
 
 function formatUrut(num) { return String(num).padStart(3, '0'); }
@@ -209,18 +226,25 @@ function switchSection(id) {
 // =====================================================================
 // 4. CORE LOGIC (STATUS DERIVATION)
 // =====================================================================
-function getParticipantStatus(pId) {
-    const names = getAspectNames(dbParticipants[pId]?.formasi);
-    let done = 0, prog = 0;
-    names.forEach(asp => {
+// Status aspek milik SATU peserta (hanya sesi dengan participantId yang cocok)
+function getAspectStatuses(pId) {
+    const out = {}, p = dbParticipants[pId];
+    if (!p) return out;
+    getAspectNames(p.formasi).forEach(asp => {
         const s = dbSessions[`${pId}_${asp}`];
-        if (s?.status === 'COMPLETED') done++; else if (s?.status === 'IN_PROGRESS') prog++;
+        const milikPeserta = s && (!s.participantId || s.participantId === pId);
+        out[asp] = (milikPeserta && s.status) ? s.status : 'NOT_STARTED';
     });
-    if (names.length > 0 && done >= names.length) return "COMPLETED";
-    if (done > 0) return "PARTIALLY_COMPLETED";
-    if (prog > 0) return "IN_PROGRESS";
-    return "NOT_STARTED";
+    return out;
 }
+function computeParticipantStatus(aspectStatuses) {
+    const st = Object.values(aspectStatuses);
+    if (st.length === 0 || st.every(x => x === 'NOT_STARTED')) return 'NOT_STARTED';
+    if (st.every(x => x === 'COMPLETED')) return 'COMPLETED';
+    if (st.some(x => x === 'COMPLETED')) return 'PARTIALLY_COMPLETED';
+    return 'IN_PROGRESS';
+}
+function getParticipantStatus(pId) { return computeParticipantStatus(getAspectStatuses(pId)); }
 
 function getBadgeHtml(status) {
     if (status === 'COMPLETED') return `<span class="badge badge-completed">Selesai</span>`;
@@ -333,7 +357,7 @@ function claimAspek(pId, asp, requiredPos) {
             return {
                 participantId: pId, aspectName: asp, posId: requiredPos, formasi: p.formasi,
                 status: 'IN_PROGRESS', interviewerId: currentUser.id, interviewerName: currentUser.name,
-                startedAt: firebase.database.ServerValue.TIMESTAMP, scores: {}, notes: "", probing: ""
+                startedAt: firebase.database.ServerValue.TIMESTAMP, updatedAt: firebase.database.ServerValue.TIMESTAMP, scores: {}, notes: ""
             };
         }
         return;
@@ -342,14 +366,14 @@ function claimAspek(pId, asp, requiredPos) {
         else if (!comm) showToast("Gagal! Aspek sudah di-claim pewawancara lain.", "warning");
         else {
             writeAudit("CLAIM_ASPECT", "Wawancara", `Klaim peserta ${p.nama} - ${asp}`, p.nama);
-            bukaWorkroom(pId, asp, false, snap.val());
+            bukaWorkroom(pId, asp, false, snap.val(), true);   // true = baru diklik: timer mulai dari awal
         }
     });
 }
 
 function editAspek(pId, asp) { isEditMode = true; bukaWorkroom(pId, asp, true, dbSessions[`${pId}_${asp}`]); }
 
-function bukaWorkroom(pId, asp, isEdit, sessionData) {
+function bukaWorkroom(pId, asp, isEdit, sessionData, fresh) {
     const p = dbParticipants[pId];
     if (!sessionData) sessionData = dbSessions[`${pId}_${asp}`];
     currentWorkSession = { pId, aspectName: asp, sessionId: `${pId}_${asp}`, formasi: p.formasi, sessionData };
@@ -359,7 +383,11 @@ function bukaWorkroom(pId, asp, isEdit, sessionData) {
     document.getElementById('mode-edit-badge').style.display = isEdit ? 'inline-block' : 'none';
 
     document.getElementById('workroom-catatan').value = sessionData?.notes || "";
-    document.getElementById('workroom-probing').value = sessionData?.probing || "";
+    // Autosave catatan selama sesi berjalan, supaya tidak hilang saat refresh/login ulang
+    document.getElementById('workroom-catatan').oninput = isEdit ? null : () => {
+        clearTimeout(noteSaveTimer);
+        noteSaveTimer = setTimeout(autosaveNotes, 800);
+    };
 
     let requiredPos = sessionData?.posId || getPosForAspect(p.formasi, asp);
     let qs = dbInstruments[p.formasi]?.[requiredPos]?.[asp] || {};
@@ -379,17 +407,22 @@ function bukaWorkroom(pId, asp, isEdit, sessionData) {
     if (html === '') html = '<div class="alert alert-warning">Belum ada pertanyaan aktif untuk aspek ini.</div>';
     document.getElementById('form-instrumen-container').innerHTML = html;
 
+    resetTombolSimpan();
     switchSection('sec-p-workroom');
 
     clearInterval(timerInterval);
+    const tb = document.getElementById('workroom-timer');
     if (!isEdit) {
-        const dur = sysSettings.durations[requiredPos] || 300;
-        const start = sessionData?.startedAt || Date.now();
+        const dur = 180; // Timer tetap 5 menit per aspek
+                     // angka kecil (mis. 5) dianggap menit, bukan detik
+        // Aspek yang baru diklik selalu mulai dari awal. Sesi yang dilanjutkan memakai jam server.
+        const sa = Number(sessionData?.startedAt);
+        const elapsed0 = (!fresh && Number.isFinite(sa) && sa > 0) ? Math.max(0, Math.floor((serverNow() - sa) / 1000)) : 0;
+        const t0 = performance.now();                  // jam monoton: tidak terpengaruh jam perangkat
+        tb.classList.remove('danger');
 
-        timerInterval = setInterval(() => {
-            const elapsed = Math.floor((Date.now() - start) / 1000);
-            let rem = dur - elapsed;
-            const tb = document.getElementById('workroom-timer');
+        const tick = () => {
+            const rem = dur - elapsed0 - Math.floor((performance.now() - t0) / 1000);
             if (rem <= 0) {
                 tb.innerText = "WAKTU HABIS";
                 tb.classList.add('danger');
@@ -398,23 +431,42 @@ function bukaWorkroom(pId, asp, isEdit, sessionData) {
             }
             tb.innerText = `${String(Math.floor(rem / 60)).padStart(2, '0')}:${String(rem % 60).padStart(2, '0')}`;
             if (rem <= 60) tb.classList.add('danger'); else tb.classList.remove('danger');
-        }, 1000);
+        };
+        tick();                                        // tampil langsung, tidak menunggu 1 detik
+        timerInterval = setInterval(tick, 1000);
     } else {
         document.getElementById('workroom-timer').innerText = "REVIEW";
         document.getElementById('workroom-timer').classList.remove('danger');
     }
 }
 
-function konfirmasiSelesaiAspek() {
-    let scores = {}; let isLengkap = true;
-    let oldScores = isEditMode ? currentWorkSession.sessionData?.scores : null;
+function resetTombolSimpan() {
+    const btn = document.querySelector('button[onclick="konfirmasiSelesaiAspek()"]');
+    if (btn) { btn.disabled = false; btn.innerText = '✓ SIMPAN & SELESAIKAN ASPEK'; }
+}
 
-    let requiredPos = currentWorkSession.sessionData?.posId || getPosForAspect(currentWorkSession.formasi, currentWorkSession.aspectName);
-    const qs = dbInstruments[currentWorkSession.formasi]?.[requiredPos]?.[currentWorkSession.aspectName] || {};
+function autosaveNotes() {
+    if (!currentWorkSession || isEditMode) return;
+    const cur = dbSessions[currentWorkSession.sessionId];
+    if (!cur || cur.status !== 'IN_PROGRESS' || cur.interviewerId !== currentUser.id) return;
+    db.ref(`aspectSessions/${currentWorkSession.sessionId}`).update({
+        notes: document.getElementById('workroom-catatan').value,
+        updatedAt: firebase.database.ServerValue.TIMESTAMP
+    }).catch(err => console.error("Autosave catatan gagal", err));
+}
+
+function konfirmasiSelesaiAspek() {
+    if (!currentWorkSession) return;
+    const ws = currentWorkSession;
+    let scores = {}; let isLengkap = true;
+    const oldScores = isEditMode ? ws.sessionData?.scores : null;
+
+    const requiredPos = ws.sessionData?.posId || getPosForAspect(ws.formasi, ws.aspectName);
+    const qs = dbInstruments[ws.formasi]?.[requiredPos]?.[ws.aspectName] || {};
     document.querySelectorAll('input[id^="skor_"]').forEach(inp => {
-        let v = parseInt(inp.value);
-        let qId = inp.id.replace('skor_', '');
-        let max = qs[qId]?.nilaiMax || 10;
+        const v = parseInt(inp.value);
+        const qId = inp.id.replace('skor_', '');
+        const max = qs[qId]?.nilaiMax || 10;
         if (isNaN(v) || v < 1 || v > max) isLengkap = false;
         scores[qId] = v;
     });
@@ -422,28 +474,34 @@ function konfirmasiSelesaiAspek() {
     if (!isLengkap && Object.keys(scores).length > 0) return showToast("Semua skor harus diisi sesuai range!", "error");
     const notes = document.getElementById('workroom-catatan').value.trim();
     if (!notes) return showToast("Catatan umum wajib diisi!", "error");
-    const probing = document.getElementById('workroom-probing').value.trim();
-    const sessRef = db.ref(`aspectSessions/${currentWorkSession.sessionId}`);
+
     const act = isEditMode ? "EDIT_SCORE" : "COMPLETE_ASPECT";
-    const pNama = dbParticipants[currentWorkSession.pId].nama;
+    const pNama = dbParticipants[ws.pId].nama;
+    const btn = document.querySelector('button[onclick="konfirmasiSelesaiAspek()"]');
+    if (btn) { btn.disabled = true; btn.innerText = 'Menyimpan...'; }
+    clearTimeout(noteSaveTimer);
 
-    sessRef.update({
-        scores, notes, probing,
-        status: 'COMPLETED',
-        completedAt: firebase.database.ServerValue.TIMESTAMP
-    }).then(() => {
-        writeAudit(act, "Wawancara", `Menyimpan nilai ${currentWorkSession.aspectName}`, pNama, JSON.stringify(oldScores), JSON.stringify(scores));
+    const payload = {
+        participantId: ws.pId, aspectName: ws.aspectName, formasi: ws.formasi, posId: requiredPos,
+        scores, notes, status: 'COMPLETED',
+        completedAt: firebase.database.ServerValue.TIMESTAMP,
+        updatedAt: firebase.database.ServerValue.TIMESTAMP
+    };
+    if (!isEditMode) { payload.interviewerId = currentUser.id; payload.interviewerName = currentUser.name; }
 
-        const names = getAspectNames(currentWorkSession.formasi);
-        let compCount = 1;
-        names.forEach(asp => {
-            if (asp !== currentWorkSession.aspectName && dbSessions[`${currentWorkSession.pId}_${asp}`]?.status === 'COMPLETED') compCount++;
-        });
-        db.ref(`participants/${currentWorkSession.pId}`).update({
-            globalStatus: compCount >= names.length ? 'COMPLETED' : 'PARTIALLY_COMPLETED'
-        });
+    db.ref(`aspectSessions/${ws.sessionId}`).update(payload).then(() => {
+        writeAudit(act, "Wawancara", `Menyimpan nilai ${ws.aspectName}`, pNama, JSON.stringify(oldScores), JSON.stringify(scores));
+        // Status keseluruhan: hanya dari aspek milik peserta ini
+        const st = getAspectStatuses(ws.pId);
+        st[ws.aspectName] = 'COMPLETED';
+        db.ref(`participants/${ws.pId}`).update({ globalStatus: computeParticipantStatus(st) });
+        resetTombolSimpan();
         keluarWorkroom();
         showToast("Aspek berhasil diselesaikan!", "success");
+    }).catch(err => {
+        console.error(err);
+        showToast("GAGAL menyimpan ke database: " + err.message + ". Data belum tersimpan, silakan coba lagi.", "error");
+        resetTombolSimpan();
     });
 }
 
@@ -913,10 +971,10 @@ function updateModalDKSDetailIfOpen(forceId = null) {
         const s = dbSessions[`${pId}_${asp}`];
         const status = s?.status || 'NOT_STARTED';
         let statBadge = getBadgeHtml(status);
-        let skorDetail = "-"; let note = "-"; let prob = "-"; let pew = "-"; let waktu = "-";
+        let skorDetail = "-"; let note = "-"; let pew = "-"; let waktu = "-";
 
         if (status !== 'NOT_STARTED') {
-            pew = s.interviewerName; note = s.notes || "-"; prob = s.probing || "-";
+            pew = esc(s.interviewerName); note = s.notes ? esc(s.notes) : "-";
             if (s.startedAt) {
                 let startStr = new Date(s.startedAt).toLocaleTimeString('id-ID');
                 let endStr = s.completedAt ? new Date(s.completedAt).toLocaleTimeString('id-ID') : '...';
@@ -936,8 +994,7 @@ function updateModalDKSDetailIfOpen(forceId = null) {
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; font-size:12px; color:var(--text-main);">
                 <div><b>Pewawancara:</b> ${pew}</div><div><b>Waktu:</b> ${waktu}</div>
-                <div style="grid-column:1/-1;"><b>Catatan:</b> ${note}</div>
-                <div style="grid-column:1/-1; color:var(--text-muted);"><b>Probing:</b> ${prob}</div>
+                <div style="grid-column:1/-1; white-space:pre-wrap;"><b>Catatan Umum:</b> ${note}</div>
             </div>
         </div>`;
     });
@@ -990,6 +1047,56 @@ function renderTableRekap() {
             <td>${getBadgeHtml(p.pStatus)}</td>
         </tr>`;
     });
+    renderTableDetail(dt);
+}
+
+function getAspectMax(formasi, pos, asp) {
+    let t = 0;
+    Object.entries(dbInstruments[formasi]?.[pos]?.[asp] || {}).forEach(([k, q]) => { if (k !== '_meta' && q && q.active !== false) t += (q.nilaiMax || 10); });
+    return t;
+}
+
+function renderTableDetail(list) {
+    const tb = document.querySelector('#table-detail tbody');
+    if (!tb) return;
+    const label = { COMPLETED: 'Selesai', IN_PROGRESS: 'Wawancara', NOT_STARTED: 'Belum Mulai' };
+    let html = '';
+    list.forEach(p => {
+        getAspectList(p.formasi).forEach(({ name: asp, pos }) => {
+            const s = dbSessions[`${p.id}_${asp}`];
+            const ok = s && (!s.participantId || s.participantId === p.id);
+            let nilai = '-';
+            if (ok && s.scores && Object.keys(s.scores).length) { nilai = 0; Object.values(s.scores).forEach(v => nilai += (Number(v) || 0)); }
+            html += `<tr>
+                <td>${formatUrut(p.urut)}</td><td>${esc(p.nama)}</td><td>${esc(p.nim)}</td><td>${esc(p.formasi)}</td><td>${esc(p.kelompok)}</td>
+                <td>${esc(pos.replace('_', ' '))}</td><td>${esc(asp)}</td><td>${ok ? esc(s.interviewerName || '-') : '-'}</td>
+                <td>${nilai}</td><td>${getAspectMax(p.formasi, pos, asp)}</td><td>${label[ok ? s.status : 'NOT_STARTED'] || '-'}</td>
+                <td style="text-align:left; white-space:pre-wrap;">${ok && s.notes ? esc(s.notes) : '-'}</td>
+            </tr>`;
+        });
+    });
+    tb.innerHTML = html;
+}
+
+function renderSyncStatus() {
+    const box = document.getElementById('sync-status-box');
+    if (!box) return;
+    if (!currentUser || !['DEV', 'DKS'].includes(currentUser.role)) { box.style.display = 'none'; return; }
+    box.style.display = 'flex';
+    const last = syncInfo?.lastSuccessAt || 0;
+    let pending = 0;
+    Object.values(dbSessions).forEach(s => { if ((s.updatedAt || s.completedAt || s.startedAt || 0) > last) pending++; });
+    let st = 'BELUM AKTIF', col = '#64748b';
+    if (syncInfo) {
+        if (syncInfo.status === 'FAILED') { st = 'FAILED'; col = '#ef4444'; }
+        else if (pending > 0) { st = 'PENDING'; col = '#f59e0b'; }
+        else { st = 'SYNCED'; col = '#10b981'; }
+    }
+    const lastTxt = last ? new Date(last).toLocaleString('id-ID') : '-';
+    box.innerHTML = `<b>Spreadsheet:</b> <span class="badge" style="background:${col};color:#fff;">${st}</span>
+        <span>Sinkron terakhir: <b>${lastTxt}</b></span>
+        <span>Menunggu: <b>${syncInfo ? pending : '-'}</b></span>
+        ${syncInfo?.status === 'FAILED' && currentUser.role === 'DEV' ? `<span style="color:#ef4444;">Error: ${esc(syncInfo.lastError || '-')}</span>` : ''}`;
 }
 
 function calculateMaxScore() {
@@ -1003,14 +1110,25 @@ function calculateMaxScore() {
 
 // Export Rekap Tools
 function exportExcelRekap() {
-    let htmlTable = document.getElementById("table-rekap"); let text = "";
-    for (let i = 0; i < htmlTable.rows.length; i++) {
-        let rowData = [];
-        for (let j = 0; j < htmlTable.rows[i].cells.length; j++) rowData.push(htmlTable.rows[i].cells[j].innerText);
-        text += rowData.join("\t") + "\n";
-    }
-    navigator.clipboard.writeText(text).then(() => showToast("Tersalin. Paste ke Excel", "success"));
-    writeAudit("EXPORT", "Rekap", "Export Excel");
+    let text = "";
+    ["table-rekap", "table-detail"].forEach(id => {
+        const t = document.getElementById(id);
+        for (let i = 0; i < t.rows.length; i++) {
+            const rowData = [];
+            for (let j = 0; j < t.rows[i].cells.length; j++) rowData.push(t.rows[i].cells[j].innerText.replace(/[\t\r\n]+/g, ' '));
+            text += rowData.join("\t") + "\n";
+        }
+        text += "\n";
+    });
+    navigator.clipboard.writeText(text).then(() => showToast("Tersalin (rekap + catatan). Paste ke Excel", "success"));
+    writeAudit("EXPORT", "Rekap", "Export Excel (copy)");
+}
+function exportXlsxRekap() {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.table_to_sheet(document.getElementById('table-rekap'), { raw: true }), 'Rekap Nilai');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.table_to_sheet(document.getElementById('table-detail'), { raw: true }), 'Catatan per Aspek');
+    XLSX.writeFile(wb, 'Rekap_Wawancara_PEMIRA.xlsx');
+    writeAudit("EXPORT", "Rekap", "Download XLSX");
 }
 function exportWordRekap() {
     const header = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Export</title><style>table{border-collapse:collapse;width:100%;}th,td{border:1px solid black;padding:5px;text-align:center;font-size:12px;}</style></head><body>`;
@@ -1165,6 +1283,8 @@ function filterAuditLog() {
 }
 
 function simpanSettings() {
+    const t = ['set-t1', 'set-t2', 'set-t3'].map(id => parseInt(document.getElementById(id).value));
+    if (t.some(v => isNaN(v) || v < 30)) return showToast("Durasi timer harus angka DETIK, minimal 30. Contoh: 300 = 5 menit.", "error");
     db.ref('settings').update({
         webName: document.getElementById('set-webname').value, status: document.getElementById('set-status')?.value || sysSettings.status || 'OPEN',
         durations: { POS_1: parseInt(document.getElementById('set-t1').value), POS_2: parseInt(document.getElementById('set-t2').value), POS_3: parseInt(document.getElementById('set-t3').value) }
@@ -1207,7 +1327,19 @@ function showToast(msg, type = "success") {
     document.getElementById('toast-container').appendChild(t);
     setTimeout(() => t.remove(), 3500);
 }
+function touchSync(action) {
+    if (action === 'LOGIN' || action === 'LOGOUT' || String(action).startsWith('EXPORT')) return;
+    db.ref('lastChange').set(firebase.database.ServerValue.TIMESTAMP).then(kickSheetSync).catch(() => {});
+}
+function kickSheetSync() {
+    if (!SHEET_SYNC_URL || kickTimer) return;
+    kickTimer = setTimeout(() => {          // gabungkan beberapa simpan berdekatan jadi satu pemicu
+        kickTimer = null;
+        fetch(SHEET_SYNC_URL, { mode: 'no-cors' }).catch(() => {});
+    }, 6000);
+}
 function writeAudit(action, module, keterangan, target = "-", oldVal = "-", newVal = "-") {
+    touchSync(action);
     db.ref('auditLogs').push({
         timestamp: firebase.database.ServerValue.TIMESTAMP,
         user: currentUser.name, role: currentUser.role,
