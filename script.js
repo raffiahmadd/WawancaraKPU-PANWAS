@@ -413,7 +413,7 @@ function bukaWorkroom(pId, asp, isEdit, sessionData, fresh) {
     clearInterval(timerInterval);
     const tb = document.getElementById('workroom-timer');
     if (!isEdit) {
-        const dur = 180; // Timer tetap 5 menit per aspek
+        const dur = 300; // Timer tetap 5 menit per aspek
                      // angka kecil (mis. 5) dianggap menit, bukan detik
         // Aspek yang baru diklik selalu mulai dari awal. Sesi yang dilanjutkan memakai jam server.
         const sa = Number(sessionData?.startedAt);
